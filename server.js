@@ -1,106 +1,32 @@
-const express = require('express');
-const cors = require('cors');
-const { Pool } = require('pg');
-const app = express();
-app.use(cors());
-app.use(express.json());
-
-// PostgreSQL Connection - Render Auto De Ga
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: process.env.DATABASE_URL? { rejectUnauthorized: false } : false
+const express=require('express');const cors=require('cors');const {Pool}=require('pg');
+const app=express();app.use(cors());app.use(express.json());
+const pool=new Pool({connectionString:process.env.DATABASE_URL,ssl:{rejectUnauthorized:false}});
+async function init(){
+await pool.query(`CREATE TABLE IF NOT EXISTS users(mobile TEXT PRIMARY KEY, coins INT DEFAULT 50, created_at TIMESTAMP DEFAULT NOW())`);
+await pool.query(`CREATE TABLE IF NOT EXISTS withdrawals(id SERIAL PRIMARY KEY, mobile TEXT, amount FLOAT, upi TEXT, status TEXT DEFAULT 'PENDING', created_at TIMESTAMP DEFAULT NOW())`);
+console.log('DB Ready - Earning + Withdrawal Tables Created');
+}init();
+app.get('/',(req,res)=>res.send('VINU JS EARNING LIVE - 9685187704@ybl - WITHDRAWAL FIXED'));
+app.post('/api/refer',async(req,res)=>{
+let {mobile}=req.body;if(!mobile)return res.json({message:'Mobile nahi'});
+try{let r=await pool.query('SELECT * FROM users WHERE mobile=$1',[mobile]);if(r.rows.length==0){await pool.query('INSERT INTO users(mobile,coins) VALUES($1,50)',[mobile]);return res.json({message:'Welcome Bonus +50 Coins! 🎉',coins:50});}else return res.json({message:'Already Registered - '+r.rows[0].coins+' Coins',coins:r.rows[0].coins});}catch(e){res.json({message:'DB Error '+e.message})}
 });
-
-// Tables Banao
-async function initDB() {
-  try {
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS users (
-        id SERIAL PRIMARY KEY,
-        mobile VARCHAR(20) UNIQUE,
-        referral_code VARCHAR(20) UNIQUE,
-        referred_by VARCHAR(20),
-        coins INT DEFAULT 0,
-        created_at TIMESTAMP DEFAULT NOW()
-      );
-      CREATE TABLE IF NOT EXISTS earnings (
-        id SERIAL PRIMARY KEY,
-        user_id INT,
-        type VARCHAR(20),
-        coins INT,
-        created_at TIMESTAMP DEFAULT NOW()
-      );
-    `);
-    console.log("DB Ready - Earning Tables Created");
-  } catch (e) { console.log("DB Error", e.message); }
-}
-initDB();
-
-// Movies Data
-const movies = [
-  { id: 1, title: "Pushpa 2 - The Rule", year: 2024, poster: "https://i.imgur.com/8Km9tLL.jpg", videoUrl: "https://www.w3schools.com/html/mov_bbb.mp4", isPremium: false },
-  { id: 2, title: "KGF Chapter 2", year: 2022, poster: "https://i.imgur.com/8Km9tLL.jpg", videoUrl: "https://www.w3schools.com/html/movie.mp4", isPremium: false },
-  { id: 3, title: "Salaar", year: 2023, poster: "https://i.imgur.com/8Km9tLL.jpg", videoUrl: "https://www.w3schools.com/html/mov_bbb.mp4", isPremium: true },
-  { id: 4, title: "RRR", year: 2022, poster: "https://i.imgur.com/8Km9tLL.jpg", videoUrl: "https://www.w3schools.com/html/movie.mp4", isPremium: true },
-  { id: 5, title: "Animal", year: 2023, poster: "https://i.imgur.com/8Km9tLL.jpg", videoUrl: "https://www.w3schools.com/html/mov_bbb.mp4", isPremium: false },
-  { id: 6, title: "Jawan", year: 2023, poster: "https://i.imgur.com/8Km9tLL.jpg", videoUrl: "https://www.w3schools.com/html/movie.mp4", isPremium: false },
-  { id: 7, title: "Pathaan", year: 2023, poster: "https://i.imgur.com/8Km9tLL.jpg", videoUrl: "https://www.w3schools.com/html/movie.mp4", isPremium: true },
-  { id: 8, title: "Gadar 2", year: 2023, poster: "https://i.imgur.com/8Km9tLL.jpg", videoUrl: "https://www.w3schools.com/html/movie.mp4", isPremium: false },
-  { id: 9, title: "Baahubali 2", year: 2017, poster: "https://i.imgur.com/8Km9tLL.jpg", videoUrl: "https://www.w3schools.com/html/mov_bbb.mp4", isPremium: false },
-  { id: 10, title: "Dangal", year: 2016, poster: "https://i.imgur.com/8Km9tLL.jpg", videoUrl: "https://www.w3schools.com/html/movie.mp4", isPremium: false }
-];
-
-app.get('/', (req, res) => res.send('VINU JS EARNING LIVE - 9685187704@ybl'));
-app.get('/api/movies', (req, res) => res.json(movies));
-
-// 1. REFER & EARN - 50 Coins
-app.post('/api/refer', async (req, res) => {
-  const { mobile, referralCode } = req.body;
-  try {
-    const myCode = 'VINU' + Math.floor(1000 + Math.random() * 9000);
-    await pool.query(`INSERT INTO users(mobile, referral_code, referred_by, coins) VALUES($1,$2,$3, $4) ON CONFLICT (mobile) DO NOTHING`, [mobile, myCode, referralCode, 0]);
-    if (referralCode) {
-      await pool.query(`UPDATE users SET coins = coins + 50 WHERE referral_code = $1`, [referralCode]);
-      await pool.query(`UPDATE users SET coins = coins + 25 WHERE mobile = $1`, [mobile]);
-    }
-    res.json({ success: true, myCode, message: "Refer Success - 50 Coins Added!" });
-  } catch (e) { res.json({ success: false, error: e.message }); }
+app.post('/api/reward/daily',async(req,res)=>{
+let {mobile}=req.body;await pool.query('UPDATE users SET coins=coins+10 WHERE mobile=$1',[mobile]);res.json({message:'Daily Reward +10 Coins Added ✅'});
 });
-
-// 2. DAILY REWARD - 10 Coins
-app.post('/api/reward/daily', async (req, res) => {
-  const { mobile } = req.body;
-  try {
-    await pool.query(`UPDATE users SET coins = coins + 10 WHERE mobile = $1`, [mobile]);
-    await pool.query(`INSERT INTO earnings(user_id, type, coins) SELECT id, 'daily', 10 FROM users WHERE mobile=$1`, [mobile]);
-    res.json({ success: true, coins: 10, message: "Daily 10 Coins Added!" });
-  } catch (e) { res.json({ success: false }); }
+app.post('/api/reward/watch',async(req,res)=>{
+let {mobile}=req.body;await pool.query('UPDATE users SET coins=coins+5 WHERE mobile=$1',[mobile]);res.json({message:'Ad Watched +5 Coins ✅'});
 });
-
-// 3. WATCH & EARN - 5 Coins per video
-app.post('/api/reward/watch', async (req, res) => {
-  const { mobile, movieId } = req.body;
-  try {
-    await pool.query(`UPDATE users SET coins = coins + 5 WHERE mobile = $1`, [mobile]);
-    res.json({ success: true, coins: 5, message: "Watch & Earn 5 Coins!" });
-  } catch (e) { res.json({ success: false }); }
+app.get('/api/wallet/:mobile',async(req,res)=>{
+let r=await pool.query('SELECT coins FROM users WHERE mobile=$1',[req.params.mobile]);res.json({coins:r.rows[0]?r.rows[0].coins:0});
 });
-
-// 4. WALLET BALANCE
-app.get('/api/wallet/:mobile', async (req, res) => {
-  try {
-    const result = await pool.query(`SELECT coins, referral_code FROM users WHERE mobile=$1`, [req.params.mobile]);
-    res.json(result.rows[0] || { coins: 0, referral_code: "NEW" });
-  } catch (e) { res.json({ coins: 0 }); }
+// REAL WITHDRAWAL - Ab yahi se hoga
+app.post('/api/withdraw',async(req,res)=>{
+let {mobile,upi,amount}=req.body;
+if(!mobile||!upi)return res.json({success:false,message:'Mobile/UPI missing'});
+await pool.query('INSERT INTO withdrawals(mobile,amount,upi) VALUES($1,$2,$3)',[mobile,amount,upi]);
+await pool.query('UPDATE users SET coins=0 WHERE mobile=$1',[mobile]); // withdraw ke baad 0
+res.json({success:true,message:`Withdrawal Request ₹${amount} Received ✅ | UPI: ${upi} | 24 ghante me 60% = ₹${(amount*0.6).toFixed(2)} aapke account me ayega | 40% MD 9685187704@ybl`});
 });
-
-// 5. EARNINGS REPORT FOR ADMIN (AAPKE LIYE)
-app.get('/api/admin/earnings', async (req, res) => {
-  try {
-    const result = await pool.query(`SELECT COUNT(*) as total_users, SUM(coins) as total_coins FROM users`);
-    res.json({...result.rows[0], payoutUPI: process.env.PAYOUT_UPI || "9685187704@ybl" });
-  } catch (e) { res.json({ error: e.message }); }
-});
-
-const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log('Earning Server Running'));
+app.get('/api/withdrawals',async(req,res)=>{let r=await pool.query('SELECT * FROM withdrawals ORDER BY id DESC');res.json(r.rows);});
+app.listen(10000,()=>console.log('Earning Server Running WITH WITHDRAWAL'));
