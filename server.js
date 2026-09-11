@@ -1,32 +1,51 @@
-const express=require('express');const cors=require('cors');const {Pool}=require('pg');
-const app=express();app.use(cors());app.use(express.json());
-const pool=new Pool({connectionString:process.env.DATABASE_URL,ssl:{rejectUnauthorized:false}});
-async function init(){
-await pool.query(`CREATE TABLE IF NOT EXISTS users(mobile TEXT PRIMARY KEY, coins INT DEFAULT 50, created_at TIMESTAMP DEFAULT NOW())`);
-await pool.query(`CREATE TABLE IF NOT EXISTS withdrawals(id SERIAL PRIMARY KEY, mobile TEXT, amount FLOAT, upi TEXT, status TEXT DEFAULT 'PENDING', created_at TIMESTAMP DEFAULT NOW())`);
-console.log('DB Ready - Earning + Withdrawal Tables Created');
-}init();
-app.get('/',(req,res)=>res.send('VINU JS EARNING LIVE - 9685187704@ybl - WITHDRAWAL FIXED'));
-app.post('/api/refer',async(req,res)=>{
-let {mobile}=req.body;if(!mobile)return res.json({message:'Mobile nahi'});
-try{let r=await pool.query('SELECT * FROM users WHERE mobile=$1',[mobile]);if(r.rows.length==0){await pool.query('INSERT INTO users(mobile,coins) VALUES($1,50)',[mobile]);return res.json({message:'Welcome Bonus +50 Coins! 🎉',coins:50});}else return res.json({message:'Already Registered - '+r.rows[0].coins+' Coins',coins:r.rows[0].coins});}catch(e){res.json({message:'DB Error '+e.message})}
+const express = require('express');
+const cors = require('cors');
+const app = express();
+app.use(cors());
+app.use(express.json());
+
+let users = {}; // { userId: { balance:0, team:0, direct:0, level:1 } }
+
+// 1. Health Check
+app.get('/api/health', (req,res)=> res.json({status:"Online", time:new Date()}) );
+
+// 2. 9 TARAH KI EARNING KA MAIN LOGIC
+app.post('/api/reward', (req,res)=>{
+  const { userId, appId, earningTypes } = req.body;
+  if(!users[userId]) users[userId] = { balance:0, team:0, apps:[] };
+
+  // Ek app ek din me ek baar
+  if(users[userId].apps.includes(appId)){
+    return res.json({success:false, error:"Ye app aaj ho chuka"});
+  }
+  users[userId].apps.push(appId);
+
+  // LEVEL 1 - Self Earning: 2 Rs
+  users[userId].balance += 2;
+
+  // LEVEL 2 - Direct Refer (jab koi aapke link se aaye)
+  // LEVEL 3 - Level Income (7 level)
+  // LEVEL 4 - Daily Task (10 apps pura)
+  if(users[userId].apps.length >= 10){
+    users[userId].balance += earningTypes.task; // 10 Rs bonus
+  }
+  // LEVEL 5 - Spin (random)
+  // LEVEL 6 - Team Bonus
+  // LEVEL 7 - Rank
+  // LEVEL 8 - Ad Bonus
+  if(users[userId].apps.length >= 100){
+    users[userId].balance += earningTypes.adBonus;
+  }
+  // LEVEL 9 - Royalty (Admin dega)
+
+  res.json({success:true, newBalance: users[userId].balance});
 });
-app.post('/api/reward/daily',async(req,res)=>{
-let {mobile}=req.body;await pool.query('UPDATE users SET coins=coins+10 WHERE mobile=$1',[mobile]);res.json({message:'Daily Reward +10 Coins Added ✅'});
+
+// 3. Wallet
+app.get('/api/wallet/:id', (req,res)=>{
+  const u = users[req.params.id] || {balance:0};
+  res.json({balance: u.balance});
 });
-app.post('/api/reward/watch',async(req,res)=>{
-let {mobile}=req.body;await pool.query('UPDATE users SET coins=coins+5 WHERE mobile=$1',[mobile]);res.json({message:'Ad Watched +5 Coins ✅'});
-});
-app.get('/api/wallet/:mobile',async(req,res)=>{
-let r=await pool.query('SELECT coins FROM users WHERE mobile=$1',[req.params.mobile]);res.json({coins:r.rows[0]?r.rows[0].coins:0});
-});
-// REAL WITHDRAWAL - Ab yahi se hoga
-app.post('/api/withdraw',async(req,res)=>{
-let {mobile,upi,amount}=req.body;
-if(!mobile||!upi)return res.json({success:false,message:'Mobile/UPI missing'});
-await pool.query('INSERT INTO withdrawals(mobile,amount,upi) VALUES($1,$2,$3)',[mobile,amount,upi]);
-await pool.query('UPDATE users SET coins=0 WHERE mobile=$1',[mobile]); // withdraw ke baad 0
-res.json({success:true,message:`Withdrawal Request ₹${amount} Received ✅ | UPI: ${upi} | 24 ghante me 60% = ₹${(amount*0.6).toFixed(2)} aapke account me ayega | 40% MD 9685187704@ybl`});
-});
-app.get('/api/withdrawals',async(req,res)=>{let r=await pool.query('SELECT * FROM withdrawals ORDER BY id DESC');res.json(r.rows);});
-app.listen(10000,()=>console.log('Earning Server Running WITH WITHDRAWAL'));
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, ()=> console.log("Backend Live on "+PORT));
