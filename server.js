@@ -47,5 +47,7 @@ app.get('/api/wallet/:id', (req,res)=>{
   res.json({balance: u.balance});
 });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, ()=> console.log("Backend Live on "+PORT));
+app.get('/', (req,res)=> res.send('VINU JS BACKEND LIVE - 9 Earning Ready'));
+
+const PORT = process.env.PORT || 10000;
+app.listen(PORT, '0.0.0.0', () => console.log("Live on " + PORT));
