@@ -1,69 +1,70 @@
 const express = require('express');
 const cors = require('cors');
+const { Pool } = require('pg');
+
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-let users = {}; // userId: { balance:0, apps:[] }
-
-app.get('/api/health', (req,res)=> res.json({status:"ok"}));
-
-app.post('/api/reward', (req,res)=>{
-  const { userId, appId, earningTypes } = req.body;
-  if(!userId) return res.json({success:false, error:"no userId"});
-  if(!users[userId]) users[userId] = { balance:0, apps:[], taskDone:false, adDone:false };
-
-  if(users[userId].apps.includes(appId)){
-    return res.json({success:false, error:"Ye app pehle ho chuka hai"});
-  }
-  users[userId].apps.push(appId);
-  users[userId].balance += 2; // LEVEL 1 - Self Earning: 2 Rs
-
-  // LEVEL 4 - Daily Task (10 apps pura)
-  if(users[userId].apps.length >= 10 &&!users[userId].taskDone){
-    users[userId].balance += earningTypes?.task||20;
-    users[userId].taskDone = true;
-  }
-  // LEVEL 8 - Ad Bonus
-  if(users[userId].apps.length >= 100 &&!users[userId].adDone){
-    users[userId].balance += earningTypes?.adBonus||50;
-    users[userId].adDone = true;
-  }
-
-  res.json({success:true, newBalance: users[userId].balance});
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false }
 });
 
-app.post('/api/claim', (req,res)=>{
-  const { userId, appId, earningTypes } = req.body;
-  if(!users[userId]) users[userId] = { balance:0, apps:[] };
-  if(users[userId].apps.includes(appId)) return res.json({success:false});
-  users[userId].apps.push(appId);
-  if(users[userId].apps.length <= 10) users[userId].balance += 2;
-  res.json({success:true, added:2, newBalance: users[userId].balance});
+// Table banao agar nahi hai
+(async () => {
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS users (
+        user_id TEXT PRIMARY KEY,
+        balance INT DEFAULT 0,
+        apps TEXT[] DEFAULT '{}',
+        task_done BOOLEAN DEFAULT false,
+        ad_done BOOLEAN DEFAULT false
+      );
+    `);
+    console.log("DB Table Ready");
+  } catch(e){ console.log(e.message) }
+})();
+
+app.get('/', (req,res)=> res.send('VINU JS BACKEND IS LIVE - PostgreSQL Connected'));
+app.get('/api/health', async (req,res)=>{
+  const r = await pool.query('SELECT COUNT(*) FROM users');
+  res.json({status:"ok", total_users: r.rows[0].count});
 });
 
-app.get('/api/wallet/:id', (req,res)=>{
-  const u = users[req.params.id] || {balance:0, apps:[]};
-  res.json({balance: u.balance, count: u.apps.length});
-});
-
-app.get('/', (req,res)=> res.send('VINU JS BACKEND IS LIVE'));
-
-// === ADMOB REWARD - REAL EARNING ===
-app.post('/api/tasks/verify-ad', (req, res) => {
+app.post('/api/tasks/verify-ad', async (req,res)=>{
   const { userId, appId, adWatched } = req.body;
-  if (!adWatched) {
-    return res.json({ success: false, message: "Ad nahi dekha" });
-  }
-  if(!users[userId]) users[userId] = { balance:0, apps:[] };
-  if(users[userId].apps.includes(appId)){
-    return res.json({success:false, message:"Already done"});
-  }
-  users[userId].apps.push(appId);
-  users[userId].balance += 15; // Ad dekhne ke baad hi 15 Rs
+  if(!adWatched) return res.json({success:false, message:"Ad skip"});
 
-  res.json({ success: true, message: "15 Rs credited after Ad", newBalance: users[userId].balance });
+  try{
+    let u = await pool.query('SELECT * FROM users WHERE user_id=$1',[userId]);
+    if(u.rows.length==0){
+      await pool.query('INSERT INTO users(user_id, balance, apps) VALUES($1,0,$2)',[userId, []]);
+      u = await pool.query('SELECT * FROM users WHERE user_id=$1',[userId]);
+    }
+    if(u.rows[0].apps.includes(appId)) return res.json({success:false, message:"Already done"});
+
+    const newApps = [...u.rows[0].apps, appId];
+    let newBal = u.rows[0].balance + 15; // Ad dekhne par 15 Rs
+
+    if(newApps.length==10 &&!u.rows[0].task_done){ newBal+=20; }
+    if(newApps.length==100 &&!u.rows[0].ad_done){ newBal+=50; }
+
+    await pool.query('UPDATE users SET apps=$1, balance=$2, task_done=$3, ad_done=$4 WHERE user_id=$5',
+      [newApps, newBal, newApps.length>=10, newApps.length>=100, userId]);
+
+    res.json({success:true, newBalance:newBal});
+  }catch(e){ res.json({success:false, error:e.message}); }
+});
+
+app.get('/api/wallet/:id', async (req,res)=>{
+  try{
+    const r = await pool.query('SELECT * FROM users WHERE user_id=$1',[req.params.id]);
+    if(r.rows.length==0) return res.json({balance:0, count:0});
+    res.json({balance:r.rows[0].balance, count:r.rows[0].apps.length});
+  }catch(e){ res.json({balance:0}); }
 });
 
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, '0.0.0.0', () => console.log("Live on "+PORT));
+app.listen(PORT, '0.0.0.0', ()=> console.log("Live "+PORT));
