@@ -6,88 +6,64 @@ app.use(express.json());
 
 let users = {}; // userId: { balance:0, apps:[] }
 
- // 1. Health Check
-app.get('/api/health', (req,res)=> res.json({status:"ok", online:true}));
+app.get('/api/health', (req,res)=> res.json({status:"ok"}));
 
- // 2. 9 TARAH KI EARNING KA MAIN LOGIC
 app.post('/api/reward', (req,res)=>{
   const { userId, appId, earningTypes } = req.body;
-  if(!userId) return res.json({success:false, error:"No userId"});
+  if(!userId) return res.json({success:false, error:"no userId"});
   if(!users[userId]) users[userId] = { balance:0, apps:[], taskDone:false, adDone:false };
 
-  // Ek app ek din me ek baar
   if(users[userId].apps.includes(appId)){
-    return res.json({success:false, error:"Ye app aaj ho gaya"});
+    return res.json({success:false, error:"Ye app pehle ho chuka hai"});
   }
   users[userId].apps.push(appId);
-
-  // LEVEL 1 - Self Earning: 2 Rs
-  users[userId].balance += 2;
-
-  // LEVEL 2 - Direct Refer (jab koi aapke link se aaye - frontend se bhejoge)
-  // LEVEL 3 - Level Income (7 level - admin dega)
+  users[userId].balance += 2; // LEVEL 1 - Self Earning: 2 Rs
 
   // LEVEL 4 - Daily Task (10 apps pura)
   if(users[userId].apps.length >= 10 &&!users[userId].taskDone){
-    users[userId].balance += earningTypes?.task || 10;
+    users[userId].balance += earningTypes?.task||20;
     users[userId].taskDone = true;
   }
-  // LEVEL 5 - Spin (random) - frontend se
-  // LEVEL 6 - Team Bonus
-  // LEVEL 7 - Rank
   // LEVEL 8 - Ad Bonus
   if(users[userId].apps.length >= 100 &&!users[userId].adDone){
-    users[userId].balance += earningTypes?.adBonus || 20;
+    users[userId].balance += earningTypes?.adBonus||50;
     users[userId].adDone = true;
   }
-  // LEVEL 9 - Royalty (Admin dega)
 
-  res.json({success:true, newBalance: users[userId].balance, apps: users[userId].apps.length});
+  res.json({success:true, newBalance: users[userId].balance});
 });
 
-// Purane frontend ke liye /api/claim bhi support
 app.post('/api/claim', (req,res)=>{
-  req.body.appId = req.body.appId || req.body.app || "app1";
-  req.body.earningTypes = {task:10, adBonus:20};
-  // same logic call
-  const { userId, appId } = req.body;
-  if(!users[userId]) users[userId] = { balance:0, apps:[], taskDone:false, adDone:false };
+  const { userId, appId, earningTypes } = req.body;
+  if(!users[userId]) users[userId] = { balance:0, apps:[] };
   if(users[userId].apps.includes(appId)) return res.json({success:false});
   users[userId].apps.push(appId);
-  users[userId].balance += 2;
-  if(users[userId].apps.length == 10) users[userId].balance += 10;
+  if(users[userId].apps.length <= 10) users[userId].balance += 2;
   res.json({success:true, added:2, newBalance: users[userId].balance});
 });
 
- // 3. Wallet
 app.get('/api/wallet/:id', (req,res)=>{
   const u = users[req.params.id] || {balance:0, apps:[]};
   res.json({balance: u.balance, count: u.apps.length});
 });
 
-app.get('/', (req,res)=> res.send('VINU JS BACKEND - 9 Level LIVE'));
-// AdMob Reward Verification - Ye Ad dekhne ke baad hi paisa dega
-app.post('/api/tasks/verify-ad', async (req, res) => {
-  const { userId, appId, adWatched } = req.body;
+app.get('/', (req,res)=> res.send('VINU JS BACKEND IS LIVE'));
 
-  // Sirf tabhi reward do jab adWatched = true ho
+// === ADMOB REWARD - REAL EARNING ===
+app.post('/api/tasks/verify-ad', (req, res) => {
+  const { userId, appId, adWatched } = req.body;
   if (!adWatched) {
     return res.json({ success: false, message: "Ad nahi dekha" });
   }
-
-  try {
-    // 1. Check karo user ne pehle ye task to nahi kiya
-    // 2. Wallet me credit karo - 15 Rs
-    // Yaha aapka PostgreSQL wala credit logic ayega
-    await db.query(
-      "UPDATE users SET wallet = wallet + 15 WHERE id = $1",
-      [userId]
-    );
-
-    res.json({ success: true, message: "15 Rs credited after Ad" });
-  } catch (err) {
-    res.json({ success: false, error: err.message });
+  if(!users[userId]) users[userId] = { balance:0, apps:[] };
+  if(users[userId].apps.includes(appId)){
+    return res.json({success:false, message:"Already done"});
   }
+  users[userId].apps.push(appId);
+  users[userId].balance += 15; // Ad dekhne ke baad hi 15 Rs
+
+  res.json({ success: true, message: "15 Rs credited after Ad", newBalance: users[userId].balance });
 });
+
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, '0.0.0.0', () => console.log("Live on "+PORT));
