@@ -66,6 +66,28 @@ app.get('/api/wallet/:id', (req,res)=>{
 });
 
 app.get('/', (req,res)=> res.send('VINU JS BACKEND - 9 Level LIVE'));
+// AdMob Reward Verification - Ye Ad dekhne ke baad hi paisa dega
+app.post('/api/tasks/verify-ad', async (req, res) => {
+  const { userId, appId, adWatched } = req.body;
 
+  // Sirf tabhi reward do jab adWatched = true ho
+  if (!adWatched) {
+    return res.json({ success: false, message: "Ad nahi dekha" });
+  }
+
+  try {
+    // 1. Check karo user ne pehle ye task to nahi kiya
+    // 2. Wallet me credit karo - 15 Rs
+    // Yaha aapka PostgreSQL wala credit logic ayega
+    await db.query(
+      "UPDATE users SET wallet = wallet + 15 WHERE id = $1",
+      [userId]
+    );
+
+    res.json({ success: true, message: "15 Rs credited after Ad" });
+  } catch (err) {
+    res.json({ success: false, error: err.message });
+  }
+});
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, '0.0.0.0', () => console.log("Live on "+PORT));
