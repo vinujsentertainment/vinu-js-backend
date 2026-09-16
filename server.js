@@ -1,8 +1,8 @@
 const express = require('express');
 const cors = require('cors');
 const { Pool } = require('pg');
-
 const app = express();
+
 app.use(cors());
 app.use(express.json());
 
@@ -11,60 +11,44 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false }
 });
 
-// Table banao agar nahi hai
-(async () => {
-  try {
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS users (
-        user_id TEXT PRIMARY KEY,
-        balance INT DEFAULT 0,
-        apps TEXT[] DEFAULT '{}',
-        task_done BOOLEAN DEFAULT false,
-        ad_done BOOLEAN DEFAULT false
-      );
-    `);
-    console.log("DB Table Ready");
-  } catch(e){ console.log(e.message) }
-})();
+// Table banao
+pool.query(`CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, balance INT DEFAULT 0);
+CREATE TABLE IF NOT EXISTS claims (user_id TEXT, app_id INT, claimed_at TIMESTAMP DEFAULT NOW(), UNIQUE(user_id, app_id))`);
 
-app.get('/', (req,res)=> res.send('VINU JS BACKEND IS LIVE - PostgreSQL Connected'));
-app.get('/api/health', async (req,res)=>{
-  const r = await pool.query('SELECT COUNT(*) FROM users');
-  res.json({status:"ok", total_users: r.rows[0].count});
+app.get('/api/wallet/:userId', async (req, res) => {
+  const { userId } = req.params;
+  let r = await pool.query('SELECT balance FROM users WHERE id=$1', [userId]);
+  if(r.rows.length==0){
+    await pool.query('INSERT INTO users(id,balance) VALUES($1,0)', [userId]);
+    return res.json({balance:0});
+  }
+  res.json({balance: r.rows[0].balance});
 });
 
-app.post('/api/tasks/verify-ad', async (req,res)=>{
+app.post('/api/tasks/verify-ad', async (req, res) => {
   const { userId, appId, adWatched } = req.body;
-  if(!adWatched) return res.json({success:false, message:"Ad skip"});
+  if(!adWatched) return res.json({success:false, message:'Ad nahi dekha'});
 
   try{
-    let u = await pool.query('SELECT * FROM users WHERE user_id=$1',[userId]);
-    if(u.rows.length==0){
-      await pool.query('INSERT INTO users(user_id, balance, apps) VALUES($1,0,$2)',[userId, []]);
-      u = await pool.query('SELECT * FROM users WHERE user_id=$1',[userId]);
+    // Check kya pehle se claim kiya hai?
+    let check = await pool.query('SELECT * FROM claims WHERE user_id=$1 AND app_id=$2', [userId, appId]);
+    if(check.rows.length>0){
+      return res.json({success:false, message:'Already Claimed!'});
     }
-    if(u.rows[0].apps.includes(appId)) return res.json({success:false, message:"Already done"});
 
-    const newApps = [...u.rows[0].apps, appId];
-    let newBal = u.rows[0].balance + 15; // Ad dekhne par 15 Rs
+    // Naya claim - Paisa do
+    const reward = 2; // Har app ka 2 Rs
+    await pool.query('INSERT INTO claims(user_id, app_id) VALUES($1,$2)', [userId, appId]);
+    await pool.query('INSERT INTO users(id,balance) VALUES($1,$2) ON CONFLICT(id) DO UPDATE SET balance = users.balance + $2', [userId, reward]);
 
-    if(newApps.length==10 &&!u.rows[0].task_done){ newBal+=20; }
-    if(newApps.length==100 &&!u.rows[0].ad_done){ newBal+=50; }
-
-    await pool.query('UPDATE users SET apps=$1, balance=$2, task_done=$3, ad_done=$4 WHERE user_id=$5',
-      [newApps, newBal, newApps.length>=10, newApps.length>=100, userId]);
-
-    res.json({success:true, newBalance:newBal});
-  }catch(e){ res.json({success:false, error:e.message}); }
+    let bal = await pool.query('SELECT balance FROM users WHERE id=$1', [userId]);
+    res.json({success:true, newBalance: bal.rows[0].balance});
+  }catch(e){
+    res.json({success:false, message:'Server Error '+e.message});
+  }
 });
 
-app.get('/api/wallet/:id', async (req,res)=>{
-  try{
-    const r = await pool.query('SELECT * FROM users WHERE user_id=$1',[req.params.id]);
-    if(r.rows.length==0) return res.json({balance:0, count:0});
-    res.json({balance:r.rows[0].balance, count:r.rows[0].apps.length});
-  }catch(e){ res.json({balance:0}); }
-});
+app.get('/', (req,res)=> res.send('Vinu JS Backend Running'));
 
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, '0.0.0.0', ()=> console.log("Live "+PORT));
+app.listen(PORT, ()=> console.log('Running on '+PORT));
