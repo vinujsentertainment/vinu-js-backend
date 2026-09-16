@@ -12,7 +12,7 @@ const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejec
   await pool.query(`CREATE TABLE IF NOT EXISTS claims (user_id TEXT, app_id INT, claimed_at TIMESTAMP DEFAULT NOW(), UNIQUE(user_id, app_id))`);
   await pool.query(`CREATE TABLE IF NOT EXISTS transactions (id SERIAL PRIMARY KEY, user_id TEXT, amount INT, type TEXT, description TEXT, created_at TIMESTAMP DEFAULT NOW())`);
   await pool.query(`CREATE TABLE IF NOT EXISTS withdrawals (id SERIAL PRIMARY KEY, user_id TEXT, amount INT, upi_id TEXT, status TEXT DEFAULT 'Pending', created_at TIMESTAMP DEFAULT NOW())`);
-  console.log("VINOD AVJS DB Ready - Earning + Withdrawal + History");
+  console.log("VINOD AVJS DB Ready");
  }catch(e){console.log(e.message);}
 })();
 
@@ -32,7 +32,6 @@ app.get('/api/withdrawals/:userId', async (req,res)=>{
 app.post('/api/tasks/verify-ad', async (req,res)=>{
  const {userId, appId, adWatched, reward}=req.body;
  const finalReward=parseInt(reward)||2;
- if(!adWatched) return res.json({success:false,message:'Ad nahi dekha'});
  try{
   let c=await pool.query('SELECT * FROM claims WHERE user_id=$1 AND app_id=$2',[userId, appId]);
   if(c.rows.length>0) return res.json({success:false,message:'Already Claimed!'});
