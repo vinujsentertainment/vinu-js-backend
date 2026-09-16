@@ -6,9 +6,13 @@ app.use(cors());
 app.use(express.json());
 const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } });
 (async()=>{
- await pool.query('CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, balance INT DEFAULT 0)');
- await pool.query('CREATE TABLE IF NOT EXISTS claims (user_id TEXT, app_id INT, claimed_at TIMESTAMP DEFAULT NOW(), UNIQUE(user_id, app_id))');
- try{ await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS balance INT DEFAULT 0'); }catch(e){}
+ try{
+  await pool.query('DROP TABLE IF EXISTS claims');
+  await pool.query('DROP TABLE IF EXISTS users');
+  await pool.query('CREATE TABLE users (id TEXT PRIMARY KEY, balance INT DEFAULT 0)');
+  await pool.query('CREATE TABLE claims (user_id TEXT, app_id INT, claimed_at TIMESTAMP DEFAULT NOW(), UNIQUE(user_id, app_id))');
+  console.log("VINOD AVJS DB Ready - 310 Apps");
+ }catch(e){console.log(e.message);}
 })();
 app.get('/api/wallet/:userId', async (req,res)=>{
  const {userId}=req.params;
