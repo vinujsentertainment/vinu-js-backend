@@ -1,7 +1,7 @@
 {
   "name": "vinu-js-backend",
-  "version": "1.0.0",
-  "description": "VINU J S ENTERTAINMENT - Rewards Platform Backend with PostgreSQL",
+  "version": "22.0.0",
+  "description": "VINOD AVJS ENTERTAINMENT - MD VINOD BAIDORIYA - Real Earning System",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
