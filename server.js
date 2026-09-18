@@ -5,95 +5,101 @@ const app = express();
 app.use(cors({origin:'*'}));
 app.use(express.json());
 
-const pool = process.env.DATABASE_URL? new Pool({connectionString:process.env.DATABASE_URL, ssl:{rejectUnauthorized:false}}) : null;
-if(pool){
-  (async()=>{
-    await pool.query(`
-    CREATE TABLE IF NOT EXISTS users(user_id TEXT PRIMARY KEY, balance INT DEFAULT 0, coins INT DEFAULT 0, total_earned INT DEFAULT 0, referral_code TEXT, referred_by TEXT, created_at TIMESTAMP DEFAULT NOW());
-    CREATE TABLE IF NOT EXISTS transactions(id SERIAL PRIMARY KEY, user_id TEXT, type TEXT, amount INT, coins INT, description TEXT, transaction_id TEXT UNIQUE, verified BOOLEAN DEFAULT false, created_at TIMESTAMP DEFAULT NOW());
-    CREATE TABLE IF NOT EXISTS user_library(user_id TEXT, story_id TEXT, liked BOOLEAN DEFAULT false, saved BOOLEAN DEFAULT false, progress INT DEFAULT 0, PRIMARY KEY(user_id, story_id));
-    `);
-    console.log('ROYAL KING TABLES READY');
-  })();
-}
+const pool = new Pool({connectionString: process.env.DATABASE_URL, ssl:{rejectUnauthorized:false}});
 
-// DUMMY ORIGINAL STORIES - Tum apna licensed content yahan daalna
-const STORIES = [
-  {id:'s1', title:'Royal King Ki Kahani', type:'audio', category:'Motivation', duration:'12:05', thumb:'👑', episodes:12, coins:5, trending:true},
-  {id:'s2', title:'Aron Ka Raja', type:'video', category:'Drama', duration:'8:32', thumb:'🎬', episodes:8, coins:10, trending:true},
-  {id:'s3', title:'Madhya Pradesh Ke Rahasya', type:'audio', category:'History', duration:'15:20', thumb:'🏰', episodes:20, coins:5, new:true},
-  {id:'s4', title:'Shorts - Motivation Reels', type:'short', category:'Shorts', duration:'0:45', thumb:'🔥', episodes:50, coins:2, trending:true},
-  {id:'s5', title:'Business Mindset', type:'audio', category:'Business', duration:'10:10', thumb:'💎', episodes:15, coins:5, popular:true},
-  {id:'s6', title:'Bhakti Kahaniya', type:'audio', category:'Bhakti', duration:'18:00', thumb:'🙏', episodes:25, coins:5, popular:true},
-];
-
-app.get('/', (req,res)=> res.send('VINOD AVJS ROYAL KING - STORY/VIDEO ORIGINAL API - LIVE '+new Date().toISOString()));
-app.get('/api/stories', (req,res)=> res.json(STORIES));
-app.get('/api/trending', (req,res)=> res.json(STORIES.filter(s=>s.trending)));
-app.get('/api/wallet/:uid', async (req,res)=>{
-  if(!pool) return res.json({user_id:req.params.uid, balance:0, coins:0, referral_code:'RK'+req.params.uid.slice(0,4)});
-  let r=await pool.query('SELECT * FROM users WHERE user_id=$1',[req.params.uid]);
-  if(r.rows.length==0){
-    let code='RK'+Math.random().toString(36).toUpperCase().slice(2,6);
-    await pool.query('INSERT INTO users(user_id,balance,coins,total_earned,referral_code) VALUES($1,0,100,0,$2)',[req.params.uid,code]);
-    r=await pool.query('SELECT * FROM users WHERE user_id=$1',[req.params.uid]);
+// Services
+const walletService = {
+  credit: async (user_id, amount, coins, type, desc, tx_id) => {
+    let check = await pool.query('SELECT id FROM wallet_transactions WHERE transaction_id=$1', [tx_id]);
+    if(check.rows.length>0) return {already:true};
+    await pool.query('BEGIN');
+    await pool.query('INSERT INTO wallet_transactions(user_id,type,amount,coins,description,transaction_id,verified) VALUES($1,$2,$3,$4,$5,$6,true)', [user_id,type,amount,coins,desc,tx_id]);
+    await pool.query('UPDATE wallets SET balance=balance+$1, coins=coins+$2, total_earned=total_earned+$1 WHERE user_id=$3', [amount,coins,user_id]);
+    await pool.query('COMMIT');
+    return {success:true};
   }
-  res.json(r.rows[0]);
+};
+
+// Routes
+app.get('/', (req,res)=> res.send('VINOD AVJS ROYAL KING PRODUCTION API - LIVE - '+new Date().toISOString()));
+
+// Content API
+app.get('/api/content', async (req,res)=>{
+  let r = await pool.query('SELECT * FROM content');
+  if(r.rows.length==0){
+    // Seed original content - Tum apna licensed content yahan dalo
+    const seed = [
+      {id:'c1',title:'Royal King Ki Kahani',type:'audio',category:'Motivation',thumb:'👑',coins_required:5,is_trending:true},
+      {id:'c2',title:'Aron Ka Raja - Web Story',type:'video',category:'Drama',thumb:'🎬',coins_required:10,is_trending:true},
+      {id:'c3',title:'Business Mindset',type:'audio',category:'Business',thumb:'💎',coins_required:5,is_trending:false}
+    ];
+    for(let s of seed){ await pool.query('INSERT INTO content VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT DO NOTHING', [s.id,s.title,s.type,s.category,s.thumb,s.coins_required,s.is_trending]); }
+    r = await pool.query('SELECT * FROM content');
+  }
+  res.json(r.rows);
 });
 
-// REAL EARNING - ADMOB SSV - Server hi coin dega
+// Wallet API - Server decides balance
+app.get('/api/wallet/:uid', async (req,res)=>{
+  let u = await pool.query('SELECT * FROM users WHERE user_id=$1', [req.params.uid]);
+  if(u.rows.length==0){
+    let code='RK'+Math.random().toString(36).toUpperCase().slice(2,6);
+    await pool.query('INSERT INTO users(user_id,referral_code) VALUES($1,$2)', [req.params.uid, code]);
+    await pool.query('INSERT INTO wallets(user_id,balance,coins) VALUES($1,0,100)', [req.params.uid]);
+    u = await pool.query('SELECT * FROM users WHERE user_id=$1', [req.params.uid]);
+  }
+  let w = await pool.query('SELECT * FROM wallets WHERE user_id=$1', [req.params.uid]);
+  res.json({...u.rows[0],...w.rows[0]});
+});
+
+// Earning API + AdMob SSV - Verified Event -> Ledger
 app.get('/api/admob/ssv', async (req,res)=>{
   const {user_id, transaction_id} = req.query;
-  if(!transaction_id) return res.send('NO_TX');
-  if(!pool) return res.send('OK_NO_DB');
+  if(!transaction_id) return res.status(400).send('NO_TX');
+  // TODO: Real me Google public key se signature verify karo
   try{
-    let c=await pool.query('SELECT id FROM transactions WHERE transaction_id=$1',[transaction_id]);
-    if(c.rows.length>0) return res.send('ALREADY_CREDITED');
-    await pool.query('INSERT INTO transactions(user_id,type,amount,coins,description,transaction_id,verified) VALUES($1,$2,$3,$4,$5,$6,true)',[user_id,'ad_reward',2,20,'Rewarded Ad Verified',transaction_id]);
-    await pool.query('UPDATE users SET balance=balance+2, coins=coins+20, total_earned=total_earned+2 WHERE user_id=$1',[user_id]);
+    await walletService.credit(user_id, 2, 20, 'ad_reward', 'Rewarded Ad Verified', transaction_id);
     res.send('OK');
   }catch(e){ res.send('ALREADY_CREDITED'); }
 });
 
 app.post('/api/earn/:type', async (req,res)=>{
-  const rewards={daily:{amt:2,coins:10}, spin:{amt:5,coins:25}};
-  let rwd=rewards[req.params.type]; if(!rwd) return res.json({success:false});
-  if(!pool) return res.json({success:true, reward:rwd.amt, coins:rwd.coins});
+  const map={daily:{amt:2,coins:10}, spin:{amt:5,coins:25}, quiz:{amt:5,coins:15}};
+  let rwd=map[req.params.type]; if(!rwd) return res.json({success:false});
   let uid=req.body.userId;
+  // Fraud Check: Daily duplicate
   if(req.params.type=='daily'){
-    let t=await pool.query("SELECT id FROM transactions WHERE user_id=$1 AND type='daily' AND created_at::date=NOW()::date",[uid]);
-    if(t.rows.length>0) return res.json({success:false, message:'Daily done'});
+    let d=await pool.query("SELECT id FROM wallet_transactions WHERE user_id=$1 AND type='daily' AND created_at::date=NOW()::date",[uid]);
+    if(d.rows.length>0) return res.json({success:false, message:'Daily already claimed'});
   }
-  await pool.query('INSERT INTO transactions(user_id,type,amount,coins,description,transaction_id) VALUES($1,$2,$3,$4,$5,$6)',[uid,req.params.type,rwd.amt,rwd.coins,req.params.type,'M_'+Date.now()]);
-  await pool.query('UPDATE users SET balance=balance+$1, coins=coins+$2, total_earned=total_earned+$1 WHERE user_id=$3',[rwd.amt,rwd.coins,uid]);
+  let tx='M_'+Date.now()+'_'+uid+'_'+req.params.type;
+  await walletService.credit(uid, rwd.amt, rwd.coins, req.params.type, req.params.type+' reward', tx);
   res.json({success:true, reward:rwd.amt, coins:rwd.coins});
 });
 
+// Referral + Withdrawal
+app.post('/api/referral/apply', async (req,res)=>{
+  let {userId, referralCode}=req.body;
+  let owner=await pool.query('SELECT user_id FROM users WHERE referral_code=$1',[referralCode]);
+  if(owner.rows.length==0) return res.json({message:'Invalid code'});
+  await pool.query('INSERT INTO referrals(referrer_id,referred_id) VALUES($1,$2) ON CONFLICT DO NOTHING', [owner.rows[0].user_id, userId]);
+  await walletService.credit(owner.rows[0].user_id, 50, 100, 'referral', 'Referral bonus', 'REF_'+userId);
+  res.json({message:'Referral applied'});
+});
+
+app.post('/api/withdrawal', async (req,res)=>{
+  let {userId, amount, upiId}=req.body;
+  let w=await pool.query('SELECT balance FROM wallets WHERE user_id=$1',[userId]);
+  if(w.rows[0].balance < amount) return res.json({message:'Insufficient balance'});
+  await pool.query('INSERT INTO withdrawals(user_id,amount,upi_id) VALUES($1,$2,$3)',[userId,amount,upiId]);
+  await pool.query('INSERT INTO wallet_transactions(user_id,type,amount,description,transaction_id) VALUES($1,$2,$3,$4,$5)',[userId,'withdraw',-amount,'Withdraw request','WD_'+Date.now()]);
+  await pool.query('UPDATE wallets SET balance=balance-$1, total_withdrawn=total_withdrawn+$1 WHERE user_id=$2',[amount,userId]);
+  res.json({message:'Withdrawal request pending admin review'});
+});
+
 app.get('/api/history/:uid', async (req,res)=>{
-  if(!pool) return res.json({transactions:[]});
-  let r=await pool.query('SELECT * FROM transactions WHERE user_id=$1 ORDER BY id DESC LIMIT 50',[req.params.uid]);
+  let r=await pool.query('SELECT * FROM wallet_transactions WHERE user_id=$1 ORDER BY id DESC LIMIT 100',[req.params.uid]);
   res.json({transactions:r.rows});
 });
 
-app.post('/api/withdraw', async (req,res)=>{
-  let {userId, amount, upiId}=req.body;
-  if(!pool) return res.json({message:'DB not connected'});
-  let u=await pool.query('SELECT balance FROM users WHERE user_id=$1',[userId]);
-  if(u.rows[0].balance < amount) return res.json({message:'Min ₹100 needed'});
-  await pool.query('INSERT INTO transactions(user_id,type,amount,description) VALUES($1,$2,$3,$4)',[userId,'withdraw',-amount,'Withdraw to '+upiId]);
-  await pool.query('UPDATE users SET balance=balance-$1 WHERE user_id=$2',[amount,userId]);
-  res.json({message:'Withdraw request: ₹'+amount});
-});
-
-app.post('/api/referral/apply', async (req,res)=>{
-  let {userId, referralCode}=req.body;
-  if(!pool) return res.json({message:'Applied'});
-  let o=await pool.query('SELECT user_id FROM users WHERE referral_code=$1',[referralCode]);
-  if(o.rows.length==0) return res.json({message:'Invalid code'});
-  await pool.query('UPDATE users SET referred_by=$1 WHERE user_id=$2',[referralCode,userId]);
-  await pool.query('INSERT INTO transactions(user_id,type,amount,coins,description) VALUES($1,$2,$3,$4,$5)',[o.rows[0].user_id,'referral',50,100,'Referral bonus']);
-  await pool.query('UPDATE users SET balance=balance+50, coins=coins+100 WHERE user_id=$1',[o.rows[0].user_id]);
-  res.json({message:'Referral applied - owner got ₹50 + 100 coins'});
-});
-
-app.listen(process.env.PORT||10000, ()=>console.log('ROYAL KING STORY APP LIVE'));
+app.listen(process.env.PORT||10000, ()=>console.log('ROYAL KING PRODUCTION LIVE'));
