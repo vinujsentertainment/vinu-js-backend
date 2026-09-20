@@ -1,71 +1,64 @@
-const express = require('express');
-const cors = require('cors');
-const rateLimit = require('express-rate-limit');
-const path = require('path');
-const { Pool } = require('pg');
-const app = express();
+import express from 'express'; import cors from 'cors'; import pg from 'pg';
+const app = express(); app.use(cors()); app.use(express.json());
+const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } });
 
-app.use(cors());
-app.use(express.json());
-app.use(express.static(__dirname));
-app.set('trust proxy', 1);
-app.use('/api/', rateLimit({ windowMs: 60*1000, max: 50 }));
-
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false }
-});
-
+// DB Auto Create
 (async () => {
-  await pool.query(`CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, balance INT DEFAULT 0, total_earned INT DEFAULT 0)`);
-  await pool.query(`CREATE TABLE IF NOT EXISTS claims (user_id TEXT, app_id INT, claimed_at TIMESTAMP DEFAULT NOW(), UNIQUE(user_id, app_id))`);
-  await pool.query(`CREATE TABLE IF NOT EXISTS withdrawals (id SERIAL PRIMARY KEY, user_id TEXT, amount INT, upi_id TEXT, status TEXT DEFAULT 'pending', created_at TIMESTAMP DEFAULT NOW())`);
-  console.log("VINOD AVJS DB READY");
+  await pool.query(`CREATE TABLE IF NOT EXISTS wallets (user_id TEXT PRIMARY KEY, balance INT DEFAULT 0)`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS withdrawals (id SERIAL PRIMARY KEY, user_id TEXT, amount INT, upi_id TEXT, status TEXT DEFAULT 'PENDING', created_at TIMESTAMP DEFAULT NOW())`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS reward_logs (id SERIAL PRIMARY KEY, user_id TEXT, network TEXT, amount INT, signature TEXT UNIQUE, created_at TIMESTAMP DEFAULT NOW())`);
 })();
 
-const ADMIN_KEY = process.env.ADMIN_KEY || "VINOD123";
+// Earning Callback - SSV Protected
+app.post('/api/reward/verify', async (req, res) => {
+  const { userId, network, signature } = req.body;
+  if (!userId ||!network) return res.json({ success: false, message: "Invalid data" });
 
-// APIs
-app.get('/api/wallet/:userId', async (req,res)=>{
-  const r=await pool.query('SELECT balance,total_earned FROM users WHERE id=$1',[req.params.userId]);
-  if(!r.rows.length){ await pool.query('INSERT INTO users(id,balance) VALUES($1,0)',[req.params.userId]); return res.json({balance:0,total_earned:0});}
-  res.json(r.rows[0]);
-});
+  // Duplicate Protection
+  if(signature){
+    const dup = await pool.query("SELECT id FROM reward_logs WHERE signature=$1", [signature]);
+    if(dup.rows.length > 0) return res.json({ success: false, message: "Already claimed" });
+  }
 
-app.post('/api/tasks/verify-ad', async (req,res)=>{
-  const {userId, appId, adWatched} = req.body;
-  if(!adWatched) return res.json({success:false,message:'Ad nahi dekha'});
+  const rewards = { admob: 3, facebook: 2, unity: 2, applovin: 3, pangle: 2, ironsource: 10, adpumb: 1 };
+  const amount = rewards[network] || 2;
+
+  const client = await pool.connect();
   try{
-    const already=await pool.query('SELECT 1 FROM claims WHERE user_id=$1 AND app_id=$2',[userId, appId]);
-    if(already.rows.length) return res.json({success:false,message:'Already Claimed'});
-    const reward = parseInt(appId)%5===0?10:2;
-    await pool.query('INSERT INTO claims(user_id, app_id) VALUES($1,$2)',[userId, appId]);
-    await pool.query('INSERT INTO users(id,balance,total_earned) VALUES($1,$2,$2) ON CONFLICT(id) DO UPDATE SET balance=users.balance+$2, total_earned=users.total_earned+$2',[userId, reward]);
-    const bal=await pool.query('SELECT balance FROM users WHERE id=$1',[userId]);
-    res.json({success:true, newBalance:bal.rows[0].balance, reward});
-  }catch(e){res.json({success:false,message:e.message})}
+    await client.query('BEGIN');
+    await client.query("INSERT INTO wallets (user_id, balance) VALUES ($1, $2) ON CONFLICT (user_id) DO UPDATE SET balance = wallets.balance + $2", [userId, amount]);
+    if(signature) await client.query("INSERT INTO reward_logs (user_id, network, amount, signature) VALUES ($1,$2,$3,$4)", [userId, network, amount, signature]);
+    await client.query('COMMIT');
+    const bal = await pool.query("SELECT balance FROM wallets WHERE user_id=$1", [userId]);
+    res.json({ success: true, reward: amount, newBalance: bal.rows[0].balance });
+  }catch(e){ await client.query('ROLLBACK'); res.json({success:false, message:e.message}); } finally{ client.release(); }
 });
 
-app.post('/api/withdraw', async (req,res)=>{
-  const {userId, upiId, amount}=req.body;
-  const amt=parseInt(amount);
-  if(!upiId||!upiId.includes('@')) return res.json({success:false,message:'Sahi UPI dalo'});
-  if(amt<100) return res.json({success:false,message:'Min ₹100'});
-  const u=await pool.query('SELECT balance FROM users WHERE id=$1',[userId]);
-  if(!u.rows.length||u.rows[0].balance<amt) return res.json({success:false,message:'Balance kam hai'});
-  await pool.query('UPDATE users SET balance=balance-$1 WHERE id=$2',[amt,userId]);
-  await pool.query('INSERT INTO withdrawals(user_id,amount,upi_id) VALUES($1,$2,$3)',[userId,amt,upiId]);
-  res.json({success:true,message:'Withdraw Request Sent! 24hr me payment hoga'});
+app.get('/api/wallet/:id', async (req,res)=>{
+  const r = await pool.query("SELECT balance FROM wallets WHERE user_id=$1", [req.params.id]);
+  res.json({ balance: r.rows[0]?.balance || 0 });
 });
 
-app.get('/api/admin/withdrawals', async (req,res)=>{
-  if(req.query.key!==ADMIN_KEY) return res.status(401).json({error:'Wrong Key'});
-  const r=await pool.query('SELECT * FROM withdrawals ORDER BY id DESC'); res.json(r.rows);
-});
-app.post('/api/admin/update-status', async (req,res)=>{
-  if(req.query.key!==ADMIN_KEY) return res.status(401).json({error:'Wrong Key'});
-  await pool.query('UPDATE withdrawals SET status=$1 WHERE id=$2',[req.body.status, req.body.id]); res.json({success:true});
+app.post('/api/withdraw', async(req,res)=>{
+  const {userId, upiId, amount} = req.body;
+  if(amount < 100) return res.json({error:"Min ₹100"});
+  const client = await pool.connect();
+  try{
+    await client.query('BEGIN');
+    const w = await client.query("SELECT balance FROM wallets WHERE user_id=$1 FOR UPDATE", [userId]);
+    if((w.rows[0]?.balance||0) < amount) throw new Error("Balance kam hai");
+    await client.query("UPDATE wallets SET balance = balance - $1 WHERE user_id=$2", [amount, userId]);
+    await client.query("INSERT INTO withdrawals (user_id, amount, upi_id) VALUES ($1,$2,$3)", [userId, amount, upiId]);
+    await client.query('COMMIT');
+    res.json({message:"Withdrawal Request Pending - 24h me payment hoga"});
+  }catch(e){ await client.query('ROLLBACK'); res.json({error:e.message}); } finally{ client.release(); }
 });
 
-app.get('/', (req,res)=> res.sendFile(path.join(__dirname,'index.html')));
-app.listen(process.env.PORT||10000, ()=> console.log('Running on 10000'));
+// Admin - x-admin-key se secure
+app.get('/api/admin/withdrawals', async(req,res)=>{
+  if(req.headers['x-admin-key']!== process.env.ADMIN_KEY) return res.status(401).json({error:"Unauthorized"});
+  const r = await pool.query("SELECT * FROM withdrawals ORDER BY id DESC");
+  res.json(r.rows);
+});
+
+app.listen(process.env.PORT || 10000, ()=>console.log("VINOD AVJS ENTERTAINMENT LIVE"));
