@@ -1,31 +1,41 @@
-const express = require('express');
-const cors = require('cors');
-const app = express();
-app.use(cors());
-app.use(express.json());
+// server.js - Main Logic
 
-// In-memory DB - Render Postgres suspend bhi ho jaye to app chalega
-let users = { balance: 45, withdraws: [] };
-
-app.get('/', (req,res) => res.send('VINU Pay Backend Running - Real Earning Active'));
-
-app.get('/balance', (req,res) => res.json({balance: users.balance}));
-
-app.post('/earn', (req,res) => {
-  // Yahan real me Adsterra ka callback check karna hai
-  // Abhi ke liye har earn par +5
-  users.balance += 5;
-  console.log('EARNED +5, new bal:', users.balance);
-  res.json({success:true, newBalance: users.balance});
+// 1. Earn Verify (Fake click nahi chalega)
+app.post('/api/earn/verify', async (req,res) => {
+  const { userId, taskId, adToken } = req.body;
+  // yahan Adsterra ka callback / sponsor ka verify check hoga
+  // agar token sahi hai tabhi ledger me entry
+  await db.query(
+    `INSERT INTO ledger (user_id, amount, type, source) 
+     VALUES ($1, 5, 'CREDIT', $2)`, [userId, taskId]
+  );
+  res.json({ success: true, newBalance: await getBalance(userId) });
 });
 
-app.post('/withdraw', (req,res) => {
-  const { upi, amount } = req.body;
-  users.withdraws.push({upi, amount, time: new Date()});
-  console.log('NEW WITHDRAW:', upi, amount);
-  users.balance = 0;
-  res.json({success:true, message:'Withdraw request received'});
+// 2. Wallet Balance = SUM(ledger) - Server se aayega, local se nahi
+app.get('/api/wallet/:userId', async (req,res) => {
+  const balance = await getBalance(req.params.userId);
+  res.json({ balance });
 });
 
-const PORT = process.env.PORT || 10000;
-app.listen(PORT, ()=> console.log('Running on '+PORT));
+// 3. Withdraw Request
+app.post('/api/withdraw', async (req,res) => {
+  const { userId, amount, upi } = req.body;
+  const balance = await getBalance(userId);
+  if(balance < amount) return res.status(400).json({ error: 'Low balance' });
+  
+  await db.query(
+    `INSERT INTO withdrawals (user_id, amount, upi, status) 
+     VALUES ($1,$2,$3,'PENDING')`, [userId, amount, upi]
+  );
+  // user ke ledger se debit nahi hoga abhi, approval ke baad hoga
+  res.json({ status: 'PENDING_APPROVAL' });
+});
+
+// 4. Admin Approval (Aapka panel)
+app.post('/api/admin/approve', async (req,res) => {
+  const { withdrawalId } = req.body;
+  // Yahan RazorpayX Payout call hoga
+  // const payout = await razorpayX.payouts.create({ amount, upi })
+  // if payout success -> ledger me DEBIT entry + withdrawal APPROVED
+});
