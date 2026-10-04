@@ -1,40 +1,52 @@
 const express = require('express');
+const path = require('path');
 const cors = require('cors');
 const { Pool } = require('pg');
 
 const app = express();
 const PORT = process.env.PORT || 10000;
 
-// Middleware
 app.use(cors());
 app.use(express.json());
 
-// Database - Neon
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
 });
 
-// Test DB
-pool.query('SELECT NOW()', (err, res) => {
-  if (err) console.error('DB Error:', err.message);
-  else console.log('✅ Neon DB Connected:', res.rows[0].now);
-});
+// API Route
+app.get('/api', (req,res) => res.send('Backend Live'));
 
-// Routes
+// HTML Frontend Route
 app.get('/', (req, res) => {
-  res.send('Vinu JS Backend is Live! 🚀');
+  res.send(`
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Vinu JS</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <style>
+            body { font-family: Arial; text-align:center; padding:50px; background:#0f0f0f; color:white; }
+            h1 { color:#00ff88; }
+            button { padding:12px 25px; font-size:16px; background:#00ff88; border:none; border-radius:8px; cursor:pointer; }
+        </style>
+    </head>
+    <body>
+        <h1>Vinu JS Backend 🚀</h1>
+        <p>Your server is Live on Render + Neon DB Connected</p>
+        <button onclick="check()">Check API Health</button>
+        <p id="status"></p>
+        <script>
+            async function check(){
+                document.getElementById('status').innerText = 'Checking...';
+                const res = await fetch('/api');
+                const text = await res.text();
+                document.getElementById('status').innerText = text;
+            }
+        </script>
+    </body>
+    </html>
+  `);
 });
 
-app.get('/api/health', async (req, res) => {
-  try {
-    const result = await pool.query('SELECT NOW()');
-    res.json({ status: 'ok', time: result.rows[0].now });
-  } catch (e) {
-    res.status(500).json({ status: 'error', error: e.message });
-  }
-});
-
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});
+app.listen(PORT, () => console.log('Server on ' + PORT));
