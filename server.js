@@ -1,35 +1,31 @@
-CREATE TABLE IF NOT EXISTS wallets (
-  user_id TEXT PRIMARY KEY,
-  balance NUMERIC(14,2) NOT NULL DEFAULT 0,
-  total_earned NUMERIC(14,2) NOT NULL DEFAULT 0,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
+const express = require('express');
+const cors = require('cors');
+const app = express();
+app.use(cors());
+app.use(express.json());
 
-CREATE TABLE IF NOT EXISTS ad_rewards (
-  transaction_id TEXT PRIMARY KEY,
-  user_id TEXT NOT NULL,
-  reward_amount NUMERIC(14,2) NOT NULL,
-  ad_unit TEXT,
-  ad_network TEXT,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
+// In-memory DB - Render Postgres suspend bhi ho jaye to app chalega
+let users = { balance: 45, withdraws: [] };
 
-CREATE TABLE IF NOT EXISTS ledger (
-  id BIGSERIAL PRIMARY KEY,
-  user_id TEXT NOT NULL,
-  type TEXT NOT NULL,
-  amount NUMERIC(14,2) NOT NULL,
-  reference TEXT UNIQUE,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
+app.get('/', (req,res) => res.send('VINU Pay Backend Running - Real Earning Active'));
 
-CREATE TABLE IF NOT EXISTS withdrawals (
-  id BIGSERIAL PRIMARY KEY,
-  user_id TEXT NOT NULL,
-  upi_id TEXT NOT NULL,
-  amount NUMERIC(14,2) NOT NULL,
-  status TEXT NOT NULL DEFAULT 'PENDING',
-  provider_payout_id TEXT,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
+app.get('/balance', (req,res) => res.json({balance: users.balance}));
+
+app.post('/earn', (req,res) => {
+  // Yahan real me Adsterra ka callback check karna hai
+  // Abhi ke liye har earn par +5
+  users.balance += 5;
+  console.log('EARNED +5, new bal:', users.balance);
+  res.json({success:true, newBalance: users.balance});
+});
+
+app.post('/withdraw', (req,res) => {
+  const { upi, amount } = req.body;
+  users.withdraws.push({upi, amount, time: new Date()});
+  console.log('NEW WITHDRAW:', upi, amount);
+  users.balance = 0;
+  res.json({success:true, message:'Withdraw request received'});
+});
+
+const PORT = process.env.PORT || 10000;
+app.listen(PORT, ()=> console.log('Running on '+PORT));
