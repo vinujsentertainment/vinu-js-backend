@@ -1,167 +1,551 @@
-require('dotenv').config();
-const express = require('express');
-const cors = require('cors');
-const { Pool } = require('pg');
-const crypto = require('crypto');
+"use strict";
+
+const express = require("express");
+const { Pool } = require("pg");
+const helmet = require("helmet");
+const rateLimit = require("express-rate-limit");
+const crypto = require("crypto");
 
 const app = express();
-const PORT = process.env.PORT || 10000;
-const MIN_WITHDRAWAL = 10000; // 10000 paise = ₹100
 
-app.use(cors());
-app.use(express.json({ limit: '20kb' }));
+app.disable("x-powered-by");
+app.use(helmet());
+app.use(express.json({ limit: "20kb" }));
+
+app.use("/api", rateLimit({
+  windowMs: 60 * 1000,
+  limit: 60,
+  standardHeaders: true,
+  legacyHeaders: false
+}));
+
+const PORT = process.env.PORT || 3000;
+
+if (!process.env.DATABASE_URL) {
+  console.error("DATABASE_URL environment variable is required");
+  process.exit(1);
+}
+
+if (!process.env.ADMIN_TOKEN || process.env.ADMIN_TOKEN.length < 32) {
+  console.error("Set a strong ADMIN_TOKEN of at least 32 characters");
+  process.exit(1);
+}
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false }
+  ssl: process.env.DATABASE_SSL === "false"
+    ? false
+    : { rejectUnauthorized: false },
+  max: 10,
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 10000
 });
 
-// --- DB INIT ---
-(async () => {
-  const fs = require('fs');
-  if (fs.existsSync('./schema.sql')) {
-    const sql = fs.readFileSync('./schema.sql', 'utf8');
-    await pool.query(sql);
-    console.log('✅ DB Schema Ready');
+const ADMIN_TOKEN = process.env.ADMIN_TOKEN;
+const MIN_WITHDRAWAL_PAISE = 10000; // ₹100
+
+function rupees(paise) {
+  return Number((paise / 100).toFixed(2));
+}
+
+function newUserId() {
+  return "VK" + crypto.randomBytes(8).toString("hex");
+}
+
+function asyncRoute(fn) {
+  return (req, res, next) =>
+    Promise.resolve(fn(req, res, next)).catch(next);
+}
+
+async function initDatabase() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS users (
+      id TEXT PRIMARY KEY,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS wallet_ledger (
+      id BIGSERIAL PRIMARY KEY,
+      user_id TEXT NOT NULL REFERENCES users(id),
+      amount_paise BIGINT NOT NULL,
+      entry_type TEXT NOT NULL
+        CHECK (entry_type IN ('credit', 'debit')),
+      source TEXT NOT NULL,
+      reference TEXT NOT NULL UNIQUE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS withdrawals (
+      id BIGSERIAL PRIMARY KEY,
+      user_id TEXT NOT NULL REFERENCES users(id),
+      amount_paise BIGINT NOT NULL CHECK (amount_paise >= 10000),
+      status TEXT NOT NULL DEFAULT 'Pending'
+        CHECK (status IN ('Pending', 'Approved', 'Paid', 'Rejected')),
+      payment_reference TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE INDEX IF NOT EXISTS ledger_user_idx
+      ON wallet_ledger(user_id);
+
+    CREATE INDEX IF NOT EXISTS withdrawals_user_idx
+      ON withdrawals(user_id);
+  `);
+
+  console.log("Database initialized");
+}
+
+async function getBalance(client, userId) {
+  const result = await client.query(`
+    SELECT COALESCE(SUM(
+      CASE
+        WHEN entry_type = 'credit' THEN amount_paise
+        ELSE -amount_paise
+      END
+    ), 0)::bigint AS balance
+    FROM wallet_ledger
+    WHERE user_id = $1
+  `, [userId]);
+
+  return Number(result.rows[0].balance);
+}
+
+function requireAdmin(req, res, next) {
+  const supplied = req.get("x-admin-token") || "";
+  const a = Buffer.from(supplied);
+  const b = Buffer.from(ADMIN_TOKEN);
+
+  if (a.length !== b.length ||
+      !crypto.timingSafeEqual(a, b)) {
+    return res.status(401).json({
+      error: "Unauthorized"
+    });
   }
-})();
 
-// --- Helpers ---
-const getWalletForUpdate = async (client, userId) => {
-  const r = await client.query('SELECT * FROM wallets WHERE user_id=$1 FOR UPDATE', [userId]);
-  if (r.rows.length === 0) throw new Error('WALLET_NOT_FOUND');
-  return r.rows[0];
-};
-
-// --- HEALTH ---
-app.get('/api/health', async (req, res) => {
-  try {
-    const db = await pool.query('SELECT NOW()');
-    res.json({ status: 'LIVE', db: db.rows[0].now, payout_provider: process.env.PAYOUT_PROVIDER || 'manual' });
-  } catch (e) {
-    res.status(500).json({ status: 'DOWN', error: e.message });
-  }
-});
-
-// --- WALLET ---
-app.get('/api/wallet', async (req, res) => {
-  const userId = req.query.user_id || 'vinu_demo';
-  const r = await pool.query('SELECT * FROM wallets WHERE user_id=$1', [userId]);
-  if (!r.rows[0]) return res.status(404).json({ error: 'No wallet' });
-  const w = r.rows[0];
-  res.json({ user_id: w.user_id, balance: w.balance/100, total_earned: w.total_earned/100, locked: w.locked_balance/100 });
-});
-
-// --- EARN with Idempotency ---
-app.post('/api/earn', async (req, res) => {
-  const userId = req.body.user_id || 'vinu_demo';
-  const amountPaise = Math.round((req.body.amount || 2) * 100);
-  const idemKey = req.body.idempotency_key || `earn_${userId}_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-    await client.query('INSERT INTO ledger (user_id, amount, type, ref_type, idempotency_key) VALUES ($1,$2,\'CREDIT\',\'EARN\',$3) ON CONFLICT (idempotency_key) DO NOTHING', [userId, amountPaise, idemKey]);
-    const ledgerCheck = await client.query('SELECT * FROM ledger WHERE idempotency_key=$1', [idemKey]);
-    if (ledgerCheck.rows.length > 1 || (ledgerCheck.rows[0] && ledgerCheck.rowCount === 0)) {} // duplicate guard handled by ON CONFLICT
-    const wallet = await getWalletForUpdate(client, userId);
-    // If this key already credited, skip double credit
-    const existing = await client.query('SELECT 1 FROM ledger WHERE idempotency_key=$1 AND created_at > NOW() - INTERVAL \'1 minute\'', [idemKey]);
-    // Simple logic: if wallet already updated for this key, return
-    // For brevity, we rely on ledger UNIQUE
-    await client.query('UPDATE wallets SET balance = balance + $1, total_earned = total_earned + $1, updated_at=NOW() WHERE user_id=$2', [amountPaise, userId]);
-    await client.query('COMMIT');
-    const updated = await pool.query('SELECT * FROM wallets WHERE user_id=$1', [userId]);
-    res.json({ ok: true, wallet: updated.rows[0].balance/100, idempotency_key: idemKey });
-  } catch (e) {
-    await client.query('ROLLBACK');
-    if (e.message.includes('duplicate')) return res.json({ ok: true, duplicate: true });
-    res.status(500).json({ error: e.message });
-  } finally { client.release(); }
-});
-
-// --- WITHDRAW REQUEST ---
-app.post('/api/withdraw', async (req, res) => {
-  const { user_id='vinu_demo', amount, upi_id, method='UPI', account_no, ifsc, holder_name, idempotency_key } = req.body;
-  if (!amount || amount*100 < MIN_WITHDRAWAL) return res.status(400).json({ error: `Minimum withdrawal ₹${MIN_WITHDRAWAL/100} है` });
-  const amountPaise = Math.round(amount * 100);
-  const key = idempotency_key || `wd_${user_id}_${amount}_${Date.now()}`;
-
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-    const wallet = await getWalletForUpdate(client, user_id);
-    if (wallet.balance < amountPaise) throw new Error('INSUFFICIENT_BALANCE');
-
-    // Check duplicate idempotency
-    const dup = await client.query('SELECT * FROM withdrawals WHERE idempotency_key=$1', [key]);
-    if (dup.rows.length > 0) { await client.query('COMMIT'); return res.json({ ok:true, duplicate:true, data: dup.rows[0] }); }
-
-    // LOCK BALANCE
-    await client.query('UPDATE wallets SET balance = balance - $1, locked_balance = locked_balance + $1 WHERE user_id=$2', [amountPaise, user_id]);
-    await client.query('INSERT INTO ledger (user_id, amount, type, ref_type, ref_id, idempotency_key) VALUES ($1,$2,\'LOCK\',\'WITHDRAW\',$3,$4)', [user_id, amountPaise, key, key+'_lock']);
-
-    const wd = await client.query(`INSERT INTO withdrawals (user_id, amount, method, upi_id, account_no, ifsc, holder_name, idempotency_key, status) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'PENDING') RETURNING *`, [user_id, amountPaise, method, upi_id, account_no, ifsc, holder_name, key]);
-    await client.query('COMMIT');
-    res.json({ ok: true, withdrawal: wd.rows[0] });
-  } catch (e) {
-    await client.query('ROLLBACK');
-    res.status(400).json({ error: e.message });
-  } finally { client.release(); }
-});
-
-// --- WITHDRAWAL HISTORY ---
-app.get('/api/withdrawals/history', async (req, res) => {
-  const userId = req.query.user_id || 'vinu_demo';
-  const r = await pool.query('SELECT * FROM withdrawals WHERE user_id=$1 ORDER BY id DESC LIMIT 50', [userId]);
-  res.json(r.rows.map(x=>({...x, amount: x.amount/100})));
-});
-
-// --- ADMIN APIs ---
-const adminAuth = (req,res,next)=>{
-  if (req.headers['x-admin-token']!== process.env.ADMIN_TOKEN) return res.status(401).json({ error: 'Admin token invalid' });
   next();
-};
+}
 
-app.get('/api/admin/withdrawals', adminAuth, async (req,res)=>{
-  const status = req.query.status || 'PENDING';
-  const r = await pool.query('SELECT * FROM withdrawals WHERE status=$1 ORDER BY id ASC', [status]);
-  res.json(r.rows);
+app.get("/health", (req, res) => {
+  res.json({
+    status: "ok",
+    app: "VINOD AVJS ROYAL KING"
+  });
 });
 
-app.post('/api/admin/withdrawals/:id/approve', adminAuth, async (req,res)=>{
-  const id = req.params.id;
+// Create a new user account.
+app.post("/api/users", asyncRoute(async (req, res) => {
+  const id = newUserId();
+
+  await pool.query(
+    "INSERT INTO users (id) VALUES ($1)",
+    [id]
+  );
+
+  res.status(201).json({
+    userId: id,
+    balance: 0,
+    currency: "INR"
+  });
+}));
+
+// Get wallet balance and transaction history.
+app.get("/api/wallet/:userId", asyncRoute(async (req, res) => {
+  const userId = req.params.userId;
+
+  const user = await pool.query(
+    "SELECT id FROM users WHERE id = $1",
+    [userId]
+  );
+
+  if (!user.rowCount) {
+    return res.status(404).json({
+      error: "User not found"
+    });
+  }
+
+  const balance = await getBalance(pool, userId);
+
+  const ledger = await pool.query(`
+    SELECT id, amount_paise, entry_type, source,
+           reference, created_at
+    FROM wallet_ledger
+    WHERE user_id = $1
+    ORDER BY id DESC
+    LIMIT 50
+  `, [userId]);
+
+  res.json({
+    userId,
+    balance: rupees(balance),
+    currency: "INR",
+    transactions: ledger.rows.map(row => ({
+      id: row.id,
+      amount: rupees(Number(row.amount_paise)),
+      type: row.entry_type,
+      source: row.source,
+      reference: row.reference,
+      createdAt: row.created_at
+    }))
+  });
+}));
+
+// Submit a withdrawal request.
+app.post("/api/withdrawals", asyncRoute(async (req, res) => {
+  const userId = String(req.body.userId || "");
+  const amount = Number(req.body.amount);
+
+  if (!userId || !Number.isFinite(amount) ||
+      !Number.isSafeInteger(amount * 100) ||
+      amount < 100 || amount > 1000000) {
+    return res.status(400).json({
+      error: "Valid userId and amount between ₹100 and ₹10,00,000 required"
+    });
+  }
+
+  const amountPaise = Math.round(amount * 100);
   const client = await pool.connect();
-  try{
-    await client.query('BEGIN');
-    const wd = await client.query('SELECT * FROM withdrawals WHERE id=$1 FOR UPDATE', [id]);
-    if(!wd.rows[0]) throw new Error('Not found');
-    if(wd.rows[0].status!== 'PENDING') throw new Error('Already processed');
-    // If manual provider, direct PAID else APPROVED -> RazorpayX worker will pick
-    const nextStatus = (process.env.PAYOUT_PROVIDER === 'manual')? 'APPROVED' : 'APPROVED';
-    await client.query('UPDATE withdrawals SET status=$1, updated_at=NOW() WHERE id=$2', [nextStatus, id]);
-    await client.query('COMMIT');
-    res.json({ ok:true, status: nextStatus });
-  }catch(e){ await client.query('ROLLBACK'); res.status(400).json({error:e.message}); } finally{ client.release(); }
+
+  try {
+    await client.query("BEGIN");
+
+    const user = await client.query(
+      "SELECT id FROM users WHERE id = $1 FOR UPDATE",
+      [userId]
+    );
+
+    if (!user.rowCount) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({
+        error: "User not found"
+      });
+    }
+
+    const balance = await getBalance(client, userId);
+
+    const pending = await client.query(`
+      SELECT COALESCE(SUM(amount_paise), 0)::bigint AS total
+      FROM withdrawals
+      WHERE user_id = $1
+        AND status IN ('Pending', 'Approved')
+    `, [userId]);
+
+    const reserved = Number(pending.rows[0].total);
+
+    if (balance - reserved < amountPaise) {
+      await client.query("ROLLBACK");
+      return res.status(400).json({
+        error: "Insufficient available balance",
+        availableBalance: rupees(Math.max(0, balance - reserved))
+      });
+    }
+
+    const result = await client.query(`
+      INSERT INTO withdrawals (user_id, amount_paise)
+      VALUES ($1, $2)
+      RETURNING id, amount_paise, status, created_at
+    `, [userId, amountPaise]);
+
+    await client.query("COMMIT");
+
+    res.status(201).json({
+      withdrawal: {
+        id: result.rows[0].id,
+        amount: rupees(Number(result.rows[0].amount_paise)),
+        status: result.rows[0].status,
+        createdAt: result.rows[0].created_at
+      }
+    });
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+}));
+
+// Check withdrawal status.
+app.get("/api/withdrawals/:userId", asyncRoute(async (req, res) => {
+  const result = await pool.query(`
+    SELECT id, amount_paise, status,
+           payment_reference, created_at, updated_at
+    FROM withdrawals
+    WHERE user_id = $1
+    ORDER BY id DESC
+    LIMIT 50
+  `, [req.params.userId]);
+
+  res.json({
+    withdrawals: result.rows.map(row => ({
+      id: row.id,
+      amount: rupees(Number(row.amount_paise)),
+      status: row.status,
+      paymentReference: row.payment_reference,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    }))
+  });
+}));
+
+// Admin-only verified revenue credit.
+// Never call this endpoint directly from the frontend.
+app.post("/api/admin/credit", requireAdmin,
+  asyncRoute(async (req, res) => {
+    const userId = String(req.body.userId || "");
+    const amount = Number(req.body.amount);
+    const reference = String(req.body.reference || "");
+    const source = String(req.body.source || "");
+
+    if (!userId || !reference ||
+        reference.length > 200 ||
+        !Number.isFinite(amount) ||
+        !Number.isSafeInteger(amount * 100) ||
+        amount <= 0 || amount > 1000000 ||
+        !["verified_ad_revenue", "admin_adjustment"].includes(source)) {
+      return res.status(400).json({
+        error: "Invalid credit data"
+      });
+    }
+
+    const amountPaise = Math.round(amount * 100);
+    const client = await pool.connect();
+
+    try {
+      await client.query("BEGIN");
+
+      const user = await client.query(
+        "SELECT id FROM users WHERE id = $1 FOR UPDATE",
+        [userId]
+      );
+
+      if (!user.rowCount) {
+        await client.query("ROLLBACK");
+        return res.status(404).json({
+          error: "User not found"
+        });
+      }
+
+      const result = await client.query(`
+        INSERT INTO wallet_ledger
+          (user_id, amount_paise, entry_type, source, reference)
+        VALUES ($1, $2, 'credit', $3, $4)
+        ON CONFLICT (reference) DO NOTHING
+        RETURNING id
+      `, [userId, amountPaise, source, reference]);
+
+      if (!result.rowCount) {
+        await client.query("ROLLBACK");
+        return res.status(409).json({
+          error: "Transaction reference already used"
+        });
+      }
+
+      await client.query("COMMIT");
+
+      res.status(201).json({
+        success: true,
+        credited: rupees(amountPaise)
+      });
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+  })
+);
+
+// Admin reviews withdrawal requests.
+app.get("/api/admin/withdrawals", requireAdmin,
+  asyncRoute(async (req, res) => {
+    const result = await pool.query(`
+      SELECT id, user_id, amount_paise, status,
+             payment_reference, created_at
+      FROM withdrawals
+      ORDER BY id DESC
+      LIMIT 100
+    `);
+
+    res.json({
+      withdrawals: result.rows.map(row => ({
+        id: row.id,
+        userId: row.user_id,
+        amount: rupees(Number(row.amount_paise)),
+        status: row.status,
+        paymentReference: row.payment_reference,
+        createdAt: row.created_at
+      }))
+    });
+  })
+);
+
+// Allowed transitions:
+// Pending -> Approved / Rejected
+// Approved -> Paid / Rejected
+app.post("/api/admin/withdrawals/:id/status",
+  requireAdmin,
+  asyncRoute(async (req, res) => {
+    const id = req.params.id;
+    const status = String(req.body.status || "");
+    const paymentReference = String(
+      req.body.paymentReference || ""
+    );
+
+    if (!["Approved", "Paid", "Rejected"].includes(status)) {
+      return res.status(400).json({
+        error: "Invalid status"
+      });
+    }
+
+    if (status === "Paid" &&
+        (!paymentReference || paymentReference.length > 200)) {
+      return res.status(400).json({
+        error: "Payment reference required when marking as Paid"
+      });
+    }
+
+    const client = await pool.connect();
+
+    try {
+      await client.query("BEGIN");
+
+      const result = await client.query(`
+        SELECT * FROM withdrawals
+        WHERE id = $1
+        FOR UPDATE
+      `, [id]);
+
+      if (!result.rowCount) {
+        await client.query("ROLLBACK");
+        return res.status(404).json({
+          error: "Withdrawal not found"
+        });
+      }
+
+      const withdrawal = result.rows[0];
+
+      const allowed =
+        (withdrawal.status === "Pending" &&
+          ["Approved", "Rejected"].includes(status)) ||
+        (withdrawal.status === "Approved" &&
+          ["Paid", "Rejected"].includes(status));
+
+      if (!allowed) {
+        await client.query("ROLLBACK");
+        return res.status(409).json({
+          error: "Invalid status transition",
+          currentStatus: withdrawal.status
+        });
+      }
+
+      if (status === "Rejected") {
+        const user = await client.query(
+          "SELECT id FROM users WHERE id = $1 FOR UPDATE",
+          [withdrawal.user_id]
+        );
+
+        // Recheck available balance before releasing reserved funds.
+        const balance = await getBalance(client, withdrawal.user_id);
+
+        const otherPending = await client.query(`
+          SELECT COALESCE(SUM(amount_paise), 0)::bigint AS total
+          FROM withdrawals
+          WHERE user_id = $1
+            AND id <> $2
+            AND status IN ('Pending', 'Approved')
+        `, [withdrawal.user_id, id]);
+
+        if (balance < Number(otherPending.rows[0].total)) {
+          await client.query("ROLLBACK");
+          return res.status(409).json({
+            error: "Cannot reject safely: wallet balance needs review"
+          });
+        }
+      }
+
+      const updated = await client.query(`
+        UPDATE withdrawals
+        SET status = $1,
+            payment_reference = CASE
+              WHEN $1 = 'Paid' THEN $2
+              ELSE payment_reference
+            END,
+            updated_at = NOW()
+        WHERE id = $3
+        RETURNING id, user_id, amount_paise, status,
+                  payment_reference, updated_at
+      `, [status, paymentReference || null, id]);
+
+      // Once paid, create an idempotent ledger debit.
+      if (status === "Paid") {
+        const w = updated.rows[0];
+
+        const debit = await client.query(`
+          INSERT INTO wallet_ledger
+            (user_id, amount_paise, entry_type, source, reference)
+          VALUES ($1, $2, 'debit', 'withdrawal', $3)
+          ON CONFLICT (reference) DO NOTHING
+          RETURNING id
+        `, [w.user_id, w.amount_paise, `withdrawal:${w.id}`]);
+
+        if (!debit.rowCount) {
+          await client.query("ROLLBACK");
+          return res.status(409).json({
+            error: "Withdrawal debit already exists; reconcile manually"
+          });
+        }
+      }
+
+      await client.query("COMMIT");
+
+      res.json({
+        success: true,
+        withdrawal: {
+          id: updated.rows[0].id,
+          userId: updated.rows[0].user_id,
+          amount: rupees(Number(updated.rows[0].amount_paise)),
+          status: updated.rows[0].status,
+          paymentReference: updated.rows[0].payment_reference
+        }
+      });
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+  })
+);
+
+app.use((err, req, res, next) => {
+  console.error("Request failed:", err.message);
+
+  if (res.headersSent) return next(err);
+
+  res.status(500).json({
+    error: "Internal server error"
+  });
 });
 
-app.post('/api/admin/withdrawals/:id/reject', adminAuth, async (req,res)=>{
-  const id = req.params.id;
-  const client = await pool.connect();
-  try{
-    await client.query('BEGIN');
-    const wd = await client.query('SELECT * FROM withdrawals WHERE id=$1 FOR UPDATE', [id]);
-    if(!wd.rows[0]) throw new Error('Not found');
-    const w = wd.rows[0];
-    if(w.status!== 'PENDING') throw new Error('Already processed');
-    await client.query('UPDATE wallets SET balance = balance + $1, locked_balance = locked_balance - $1 WHERE user_id=$2', [w.amount, w.user_id]);
-    await client.query('INSERT INTO ledger (user_id, amount, type, ref_type, ref_id) VALUES ($1,$2,\'REFUND\',\'WITHDRAW\',$3)', [w.user_id, w.amount, String(id)]);
-    await client.query('UPDATE withdrawals SET status=\'REJECTED\', updated_at=NOW() WHERE id=$1', [id]);
-    await client.query('COMMIT');
-    res.json({ ok:true, refunded: true });
-  }catch(e){ await client.query('ROLLBACK'); res.status(400).json({error:e.message}); } finally{ client.release(); }
+async function start() {
+  await initDatabase();
+
+  const server = app.listen(PORT, () => {
+    console.log(`VINOD AVJS ROYAL KING running on port ${PORT}`);
+  });
+
+  async function shutdown() {
+    server.close(async () => {
+      await pool.end();
+      process.exit(0);
+    });
+  }
+
+  process.on("SIGTERM", shutdown);
+  process.on("SIGINT", shutdown);
+}
+
+start().catch(error => {
+  console.error("Startup failed:", error.message);
+  process.exit(1);
 });
-
-// --- FRONTEND ---
-app.get('/', (req,res)=> res.send('<h2>VINOD AVJS REAL WITHDRAWAL BACKEND LIVE</h2><p>Use /api/health</p>'));
-
-app.listen(PORT, ()=> console.log(`✅ Backend LIVE on ${PORT}`));
