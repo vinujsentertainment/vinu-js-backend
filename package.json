@@ -1,19 +1,19 @@
 {
-"name": "vinod-avjs-royal-king",
-"version": "1.0.0",
-"description": "Royal King App Directory and Wallet Backend",
-"main": "server.js",
-"scripts": {
-"start": "node server.js"
-},
-"engines": {
-"node": ">=20"
-},
-"dependencies": {
-"cors": "^2.8.5",
-"dotenv": "^16.4.7",
-"express": "^4.21.2",
-"helmet": "^8.0.0",
-"pg": "^8.13.1"
-}
+  "name": "vinod-avjs-royal-king-backend",
+  "version": "1.0.0",
+  "description": "VINOD AVJS ROYAL KING earning app backend",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "cors": "^2.8.5",
+    "express": "^4.21.2",
+    "jsonwebtoken": "^9.0.2",
+    "pg": "^8.13.1"
+  }
 }
